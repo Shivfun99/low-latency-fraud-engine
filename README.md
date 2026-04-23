@@ -210,7 +210,11 @@ Fraud_Detection_Kafka_cpp/
 - Data encryption at rest (PostgreSQL) and in transit
 - Role-based access for dashboard
 - Idempotency via transaction IDs
-
+- 
+#####
+Kafka, Redis, and Docker are runtime dependencies and are not committed to the repository.
+Kafka binaries under /opt are for local development only.
+Use docker-compose.yml or install services manually.
 ## 📈 Scalability
 
 - **Kafka**: Increase partitions (currently 6)
