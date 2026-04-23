@@ -1,4 +1,7 @@
 # # ⚡ Low-Latency Fraud Engine — Real-Time Fraud Detection System
+## Problem Statement
+
+Traditional fraud systems often detect suspicious activity too late. This project detects fraud in real time by processing streaming transactions, applying velocity checks in Redis, scoring risk using a C++ gRPC service, and broadcasting alerts instantly to a live dashboard.
 
 > **Kafka** + **Redis** + **Spring Boot** + **C++ ML (gRPC)** + **Express.js WebSocket** + **React Dashboard**
 
@@ -211,10 +214,7 @@ Fraud_Detection_Kafka_cpp/
 - Role-based access for dashboard
 - Idempotency via transaction IDs
 - 
-#####
-Kafka, Redis, and Docker are runtime dependencies and are not committed to the repository.
-Kafka binaries under /opt are for local development only.
-Use docker-compose.yml or install services manually.
+> Note: Kafka, Redis, and Docker are runtime dependencies and are not committed to the repository. Kafka binaries under `/opt` are for local development only.
 ## 📈 Scalability
 
 - **Kafka**: Increase partitions (currently 6)
