@@ -1,0 +1,227 @@
+services:
+  # ─── Kafka (KRaft Mode - No Zookeeper) ────────────────
+  kafka:
+    image: confluentinc/cp-kafka:7.5.0
+    container_name: fraud-kafka
+    ports:
+      - "9092:9092"
+      - "29092:29092"
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: 'CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT'
+      KAFKA_ADVERTISED_LISTENERS: 'PLAINTEXT://kafka:29092,PLAINTEXT_HOST://localhost:9092'
+      KAFKA_PROCESS_ROLES: 'broker,controller'
+      KAFKA_CONTROLLER_QUORUM_VOTERS: '1@kafka:29093'
+      KAFKA_LISTENERS: 'PLAINTEXT://kafka:29092,CONTROLLER://kafka:29093,PLAINTEXT_HOST://0.0.0.0:9092'
+      KAFKA_INTER_BROKER_LISTENER_NAME: 'PLAINTEXT'
+      KAFKA_CONTROLLER_LISTENER_NAMES: 'CONTROLLER'
+      KAFKA_LOG_DIRS: '/tmp/kraft-combined-logs'
+      CLUSTER_ID: 'mkU3pNp9TaeY6N6D5b7xmA'
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+    restart: on-failure
+    networks:
+      - fraud-network
+    healthcheck:
+      test: ["CMD", "kafka-broker-api-versions", "--bootstrap-server", "localhost:9092"]
+      interval: 10s
+      timeout: 10s
+      retries: 5
+
+  # ─── Kafka Topic Init ───────────────────────────────
+  kafka-init:
+    image: confluentinc/cp-kafka:7.5.0
+    container_name: fraud-kafka-init
+    depends_on:
+      kafka:
+        condition: service_healthy
+    entrypoint: ["/bin/sh", "-c"]
+    command: |
+      "
+      echo 'Creating Kafka topics...'
+      kafka-topics --bootstrap-server kafka:29092 --create --if-not-exists --topic transactions.raw --partitions 6 --replication-factor 1
+      kafka-topics --bootstrap-server kafka:29092 --create --if-not-exists --topic fraud.decisions --partitions 6 --replication-factor 1
+      kafka-topics --bootstrap-server kafka:29092 --create --if-not-exists --topic fraud.alerts --partitions 3 --replication-factor 1
+      kafka-topics --bootstrap-server kafka:29092 --create --if-not-exists --topic fraud.dlq --partitions 1 --replication-factor 1
+      echo 'Topics created successfully!'
+      kafka-topics --bootstrap-server kafka:29092 --list
+      "
+    networks:
+      - fraud-network
+
+  # ─── Redis ──────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    container_name: fraud-redis
+    ports:
+      - "6379:6379"
+    command: redis-server --maxmemory 256mb --maxmemory-policy allkeys-lru
+    restart: on-failure
+    networks:
+      - fraud-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  # ─── PostgreSQL ─────────────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    container_name: fraud-postgres
+    ports:
+      - "5433:5432"
+    environment:
+      POSTGRES_DB: fraud_detection
+      POSTGRES_USER: fraud_user
+      POSTGRES_PASSWORD: fraud_pass_2024
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./infrastructure/db/init.sql:/docker-entrypoint-initdb.d/init.sql
+    restart: on-failure
+    networks:
+      - fraud-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U fraud_user -d fraud_detection"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  # ─── C++ ML gRPC Service ────────────────────────────
+  ml-service:
+    image: fraud_detection_kakfa_cpp-ml-service
+    container_name: fraud-ml-service
+    ports:
+      - "50051:50051"
+    restart: on-failure
+    networks:
+      - fraud-network
+    healthcheck:
+      test: ["CMD", "/app/health_check", "localhost:50051"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  # ─── WebSocket Gateway ──────────────────────────────
+  websocket-gateway:
+    image: fraud_detection_kakfa_cpp-websocket-gateway
+    container_name: fraud-ws-gateway
+    ports:
+      - "3001:3001"
+    environment:
+      KAFKA_BROKER: kafka:29092
+      PORT: 3001
+    depends_on:
+      kafka:
+        condition: service_healthy
+    restart: on-failure
+    networks:
+      - fraud-network
+
+  # ─── React Dashboard ───────────────────────────────
+  dashboard:
+    image: fraud_detection_kakfa_cpp-dashboard
+    container_name: fraud-dashboard
+    ports:
+      - "5173:5173"
+    depends_on:
+      - websocket-gateway
+    restart: on-failure
+    networks:
+      - fraud-network
+
+  # ─── Transaction Gateway ──────────────────────────────
+  transaction-gateway:
+    image: eclipse-temurin:17-jre
+    container_name: fraud-transaction-gateway
+    volumes:
+      - ./spring-services/transaction-gateway/target/transaction-gateway-1.0.0.jar:/app.jar
+    command: java -jar /app.jar
+    ports:
+      - "8080:8080"
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      TRANSACTIONS_TOPIC: transactions.raw
+    depends_on:
+      kafka:
+        condition: service_healthy
+    restart: on-failure
+    networks:
+      - fraud-network
+
+  # ─── Fraud Orchestrator ───────────────────────────────
+  fraud-orchestrator:
+    image: eclipse-temurin:17-jre
+    container_name: fraud-orchestrator
+    volumes:
+      - ./spring-services/fraud-orchestrator/target/fraud-orchestrator-1.0.0.jar:/app.jar
+    command: java -jar /app.jar
+    ports:
+      - "8081:8081"
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/fraud_detection
+      SPRING_REDIS_HOST: redis
+      ML_HOST: ml-service
+    depends_on:
+      kafka:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      ml-service:
+        condition: service_healthy
+    restart: on-failure
+    networks:
+      - fraud-network
+
+  # ─── Case Management ──────────────────────────────────
+  case-management:
+    image: eclipse-temurin:17-jre
+    container_name: fraud-case-management
+    volumes:
+      - ./spring-services/case-management/target/case-management-1.0.0.jar:/app.jar
+    command: java -jar /app.jar
+    ports:
+      - "8082:8082"
+    environment:
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/fraud_detection
+      SPRING_DATASOURCE_USERNAME: fraud_user
+      SPRING_DATASOURCE_PASSWORD: fraud_pass_2024
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: on-failure
+    networks:
+      - fraud-network
+
+  # ─── Notification Service ─────────────────────────────
+  notification-service:
+    image: eclipse-temurin:17-jre
+    container_name: fraud-notification-service
+    volumes:
+      - ./spring-services/notification-service/target/notification-service-1.0.0.jar:/app.jar
+    command: java -jar /app.jar
+    ports:
+      - "8083:8083"
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      ALERTS_TOPIC: fraud.alerts
+      KAFKA_GROUP_ID: notification-service-group
+    depends_on:
+      kafka:
+        condition: service_healthy
+    restart: on-failure
+    networks:
+      - fraud-network
+
+volumes:
+  postgres_data:
+
+networks:
+  fraud-network:
+    driver: bridge

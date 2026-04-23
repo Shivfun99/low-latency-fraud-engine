@@ -1,0 +1,79 @@
+syntax = "proto3";
+
+package fraud;
+
+option java_multiple_files = true;
+option java_package = "com.frauddetection.grpc";
+option java_outer_classname = "FraudScoringProto";
+
+// ─── Fraud Scoring Service ─────────────────────────────
+service FraudScoringService {
+  // Score a single transaction
+  rpc ScoreTransaction (ScoringRequest) returns (ScoringResponse);
+  
+  // Batch scoring for high throughput
+  rpc BatchScore (BatchScoringRequest) returns (BatchScoringResponse);
+  
+  // Health check
+  rpc HealthCheck (HealthRequest) returns (HealthResponse);
+}
+
+// ─── Messages ──────────────────────────────────────────
+message ScoringRequest {
+  string transaction_id = 1;
+  string user_id = 2;
+  double amount = 3;
+  string merchant_id = 4;
+  string category = 5;
+  string location = 6;
+  string device_id = 7;
+  string ip_address = 8;
+  string channel = 9;
+  int64 timestamp = 10;
+  
+  // Redis-enriched features
+  TransactionFeatures features = 11;
+}
+
+message TransactionFeatures {
+  int32 txn_count_1m = 1;        // transactions in last 1 minute
+  int32 txn_count_10m = 2;       // transactions in last 10 minutes
+  int32 txn_count_1h = 3;        // transactions in last 1 hour
+  double amount_sum_1h = 4;      // total amount in last 1 hour
+  double avg_amount = 5;         // historical average amount
+  double amount_deviation = 6;   // deviation from average
+  bool is_known_device = 7;      // device previously seen
+  bool is_known_location = 8;    // location previously seen
+  int32 unique_merchants_1h = 9; // unique merchants in 1 hour
+  double max_amount_24h = 10;    // max single transaction in 24h
+}
+
+message ScoringResponse {
+  string transaction_id = 1;
+  double risk_score = 2;          // 0.0 - 1.0
+  string decision = 3;            // ALLOW, REVIEW, BLOCK
+  double velocity_score = 4;
+  double geo_anomaly_score = 5;
+  double amount_anomaly_score = 6;
+  double ml_model_score = 7;
+  int64 processing_time_us = 8;   // microseconds
+  repeated string triggered_rules = 9;
+}
+
+message BatchScoringRequest {
+  repeated ScoringRequest requests = 1;
+}
+
+message BatchScoringResponse {
+  repeated ScoringResponse responses = 1;
+  int64 total_processing_time_us = 2;
+}
+
+message HealthRequest {}
+
+message HealthResponse {
+  bool healthy = 1;
+  string model_version = 2;
+  int64 uptime_seconds = 3;
+  int64 total_scored = 4;
+}

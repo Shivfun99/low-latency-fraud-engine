@@ -1,0 +1,52 @@
+# Dependencies
+**/node_modules/
+**/target/
+**/build/
+**/dist/
+**/venv/
+**/.venv/
+**/__pycache__/
+
+# Large Binaries and Archives
+opt/
+*.tgz
+*.tar.gz
+*.zip
+*.jar
+*.war
+*.ear
+
+# C++ Build Artifacts
+**/CMakeFiles/
+**/CMakeCache.txt
+**/cmake_install.cmake
+**/Makefile
+*.o
+*.obj
+*.out
+*.so
+*.a
+*.lib
+*.dll
+*.exe
+
+# Configuration and Secrets
+.env
+.env.*
+!.env.example
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Logs and Temp
+*.log
+logs/
+/tmp/kafka-logs/
+/tmp/zookeeper/
+
+# OS specific files
+.DS_Store
+Thumbs.db

@@ -1,0 +1,49 @@
+server:
+  port: 8081
+
+spring:
+  application:
+    name: fraud-orchestrator
+  datasource:
+    url: ${SPRING_DATASOURCE_URL:jdbc:postgresql://localhost:5432/fraud_detection}
+    username: ${SPRING_DATASOURCE_USERNAME:fraud_user}
+    password: ${SPRING_DATASOURCE_PASSWORD:fraud_pass_2024}
+  jpa:
+    hibernate:
+      ddl-auto: none
+    open-in-view: false
+    properties:
+      hibernate:
+        jdbc:
+          time_zone: UTC
+  data:
+    redis:
+      host: ${SPRING_REDIS_HOST:localhost}
+      port: ${SPRING_REDIS_PORT:6379}
+      timeout: 2s
+  kafka:
+    bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
+    consumer:
+      group-id: ${KAFKA_GROUP_ID:fraud-orchestrator-group-v2}
+      auto-offset-reset: earliest
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      value-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+    producer:
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.apache.kafka.common.serialization.StringSerializer
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
+
+fraud:
+  kafka:
+    topics:
+      transactions: ${TRANSACTIONS_TOPIC:transactions.raw}
+      decisions: ${DECISIONS_TOPIC:fraud.decisions}
+      alerts: ${ALERTS_TOPIC:fraud.alerts}
+  ml:
+    host: ${ML_HOST:localhost}
+    port: ${ML_PORT:50051}
