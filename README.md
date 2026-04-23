@@ -1,4 +1,4 @@
-# 🛡️ Fraud Shield — Real-Time Fraud Detection System
+# # ⚡ Low-Latency Fraud Engine — Real-Time Fraud Detection System
 
 > **Kafka** + **Redis** + **Spring Boot** + **C++ ML (gRPC)** + **Express.js WebSocket** + **React Dashboard**
 
