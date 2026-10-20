@@ -17,7 +17,7 @@ A useful fraud detection flow needs to do several things together:
 
 ## A simple example
 
-Suppose Shuv usually makes a few small purchases from the same phone. Within seconds, several more payments arrive for Shuv from that device. Each payment might look plausible alone, but the burst is unusual as a group. A detector that tracks recent transaction velocity can raise the risk, save the decision, and notify the review dashboard.
+Suppose Shiv usually makes a few small purchases from the same phone. Within seconds, several more payments arrive for Shiv from that device. Each payment might look plausible alone, but the burst is unusual as a group. A detector that tracks recent transaction velocity can raise the risk, save the decision, and notify the review dashboard.
 
 This repository demonstrates that flow with generated and manually submitted transactions. It does not connect to a bank or stop a real payment.
 
@@ -142,7 +142,7 @@ The local sandbox endpoint accepts a transaction without a login and sends it th
 curl -i http://localhost:8080/api/v1/sandbox/ingest \
   -H 'Content-Type: application/json' \
   -d '{
-    "user_id": "shuv",
+    "user_id": "shiv",
     "amount": 5000,
     "currency": "INR",
     "merchant_id": "shop-1",
@@ -167,14 +167,14 @@ The burst mode is useful for observing how repeated activity changes decisions. 
 node scripts/smoke-test.mjs
 ```
 
-## Example: Shuv's transaction burst
+## Example: Shiv's transaction burst
 
-Shuv normally uses a phone to make occasional purchases. During a test, seven `₹100` online transactions arrive for Shuv in quick succession from the same device, merchant, and Chennai location. Considered individually, each amount is small. Considered together, the sudden transaction velocity is unusual.
+Shiv normally uses a phone to make occasional purchases. During a test, seven `₹100` online transactions arrive for Shiv in quick succession from the same device, merchant, and Chennai location. Considered individually, each amount is small. Considered together, the sudden transaction velocity is unusual.
 
 Here is what happens in the project:
 
 1. The gateway accepts each transaction and publishes it to `transactions.raw`.
-2. The orchestrator checks Shuv's recent activity in Redis and sends the resulting features to the C++ scorer.
+2. The orchestrator checks Shiv's recent activity in Redis and sends the resulting features to the C++ scorer.
 3. The scorer weighs velocity alongside amount, device, location, and merchant signals.
 4. The orchestrator saves the decisions in PostgreSQL and publishes a fraud alert for a blocked transaction.
 5. The dashboard receives the live alert; an analyst can open its case and resolve it.
