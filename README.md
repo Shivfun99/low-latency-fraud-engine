@@ -1,227 +1,109 @@
-# # ⚡ Low-Latency Fraud Engine — Real-Time Fraud Detection System
-## Problem Statement
+# Low-Latency Fraud Engine
 
-Traditional fraud systems often detect suspicious activity too late. This project detects fraud in real time by processing streaming transactions, applying velocity checks in Redis, scoring risk using a C++ gRPC service, and broadcasting alerts instantly to a live dashboard.
+An event-driven fraud detection prototype built with Kafka, Redis, Spring Boot, C++ gRPC, PostgreSQL, Express/WebSocket, and React.
 
-> **Kafka** + **Redis** + **Spring Boot** + **C++ ML (gRPC)** + **Express.js WebSocket** + **React Dashboard**
+It accepts transactions, calculates recent user activity, scores fraud risk, stores decisions and cases, and streams alerts to an analyst dashboard. The C++ scorer is a hand-written heuristic ensemble; it is not a trained XGBoost model. Sub-20 ms latency and million-transaction throughput are design goals, not verified benchmarks.
 
-A production-grade, event-driven fraud detection system capable of processing millions of transactions per second with **sub-20ms** end-to-end latency.
+Read [details.md](details.md) for the problem statement, what this project implements, how the components solve the problem, fixes, and verification results.
 
----
-
-## 🏗️ Architecture
-
+```text
+REST transaction → Kafka transactions.raw → Spring orchestrator
+                                            ├─ Redis rolling activity features
+                                            ├─ C++ gRPC risk scoring
+                                            └─ PostgreSQL transactions/decisions/cases
+                                                     ↓
+                                     Kafka fraud.decisions + fraud.alerts
+                                            ├─ WebSocket → React dashboard
+                                            └─ Notification inbox
 ```
-Transaction → Kafka → Spring Boot → Redis + C++ ML → Decision → Kafka → WebSocket → React
-```
 
-| Service | Tech | Port | Role |
-|---------|------|------|------|
-| Kafka | Confluent 7.5 | 9092 | Event streaming backbone |
-| Redis | Redis 7 Alpine | 6379 | Real-time velocity detection |
-| PostgreSQL | Postgres 16 | 5432 | Audit & persistence |
-| C++ ML Service | C++17 / gRPC | 50051 | Low-latency fraud scoring (2-4ms) |
-| Transaction Gateway | Spring Boot 3.2 | 8080 | REST ingestion → Kafka producer |
-| Fraud Orchestrator | Spring Boot 3.2 | 8081 | Core fraud engine (consumer + scoring) |
-| WebSocket Gateway | Express.js / ws | 3001 | Real-time alert broadcasting |
-| Dashboard | React + Vite | 5173 | Live monitoring UI |
+## Run the complete stack with Docker
 
----
-
-## 🚀 Quick Start
-
-### Prerequisites
-- Docker & Docker Compose
-- Java 17+ (for Spring Boot)
-- Node.js 18+ (for WebSocket Gateway & Dashboard)
-- CMake & gRPC (for C++ ML Service, or use Docker)
-
-### 1. Start Infrastructure
+Install Docker with Compose, then run from the repository root:
 
 ```bash
-docker-compose up -d zookeeper kafka redis postgres kafka-init
+docker compose up --build -d
+docker compose ps
+docker compose logs --tail=100
 ```
 
-### 2. Start WebSocket Gateway
+The first build downloads dependencies and can take several minutes. Compose builds the C++, Java, and JavaScript applications from source; prebuilt local images or JARs are not required. Kafka uses KRaft, so there is no ZooKeeper service.
+
+Open **http://localhost:5173**. Use the dashboard transaction form to submit test transactions through the real scoring pipeline. Repeated requests for the same user exercise velocity detection. Cases can be reviewed and resolved from the dashboard.
 
 ```bash
-cd websocket-gateway
-npm install
-npm start
+# Stop containers, preserving PostgreSQL data
+docker compose down
 ```
 
-### 3. Start React Dashboard
+For host applications with containerized infrastructure, or a fully native installation, follow [run-without-docker.md](run-without-docker.md).
+
+## Services
+
+| Service              | Local port | Purpose                                      |
+| -------------------- | ---------- | -------------------------------------------- |
+| Kafka                | 9092       | Transaction and decision events              |
+| Redis                | 6380       | Rolling features; container port is 6379     |
+| PostgreSQL           | 5433       | Audit storage; container port is 5432        |
+| C++ scorer           | 50051      | gRPC scoring and health RPC                  |
+| Transaction gateway  | 8080       | Ingestion, demo login, sandbox               |
+| Fraud orchestrator   | 8081       | Features, scoring, persistence, case actions |
+| Case management      | 8082       | Case retrieval and actions                   |
+| Notification service | 8083       | Recent alert inbox; optional dispatchers     |
+| WebSocket gateway    | 3001       | Live alerts, decisions, counters             |
+| Dashboard            | 5173       | React UI and API/WebSocket proxy             |
+
+## Generate traffic and verify
+
+With the services running:
 
 ```bash
-cd dashboard
-npm install
-npm run dev
+npm --prefix simulator ci
+node simulator/simulator.js --mode demo
+node simulator/simulator.js --mode burst
+
+npm --prefix websocket-gateway ci
+node scripts/smoke-test.mjs
 ```
 
-### 4. Run Transaction Simulator
+The smoke test creates seven transactions for a unique test user, checks authentication and validation, verifies live decisions and a blocked burst, retrieves a persisted case, resolves it, and checks the notification inbox. It leaves test records in the database.
+
+The simulator uses the sandbox ingestion API, which still runs through Kafka, Redis, C++, and PostgreSQL. `/api/test-alert` on the WebSocket gateway creates a synthetic, non-actionable display alert only.
+
+## Build and component tests
 
 ```bash
-cd simulator
-npm install
+# C++: requires C++17, CMake, pkg-config, protobuf and gRPC development tools
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build -j2
+ctest --test-dir build --output-on-failure
 
-# Normal mixed traffic
-node simulator.js
+# Java: use JDK 17 and Maven
+mvn package
 
-# Velocity attack burst (Rahul scenario)
-node simulator.js --mode burst
+# Optional Redis integration tests (against a running development Redis)
+FRAUD_REDIS_TEST_PORT=6380 mvn -pl spring-services/fraud-orchestrator -am test
 
-# Fraud-heavy traffic
-node simulator.js --mode fraud
-
-# Narrated demo
-node simulator.js --mode demo
+npm --prefix websocket-gateway ci
+npm --prefix websocket-gateway test
+npm --prefix simulator ci
+npm --prefix simulator test
+npm --prefix dashboard ci
+npm --prefix dashboard run build
 ```
 
-### 5. Start Spring Boot Services (optional, needs Kafka running)
+## API example
+
+The sandbox endpoint is available without login for local development:
 
 ```bash
-cd spring-services
-mvn clean package -DskipTests
-
-# Transaction Gateway
-java -jar transaction-gateway/target/transaction-gateway-1.0.0.jar
-
-# Fraud Orchestrator
-java -jar fraud-orchestrator/target/fraud-orchestrator-1.0.0.jar
+curl -fsS http://localhost:8080/api/v1/sandbox/ingest \
+  -H 'Content-Type: application/json' \
+  -d '{"user_id":"rahul","amount":5000,"currency":"INR","merchant_id":"shop-1","location":"Chennai","device_id":"phone-1","channel":"ONLINE"}'
 ```
 
-### 6. Full Stack via Docker
+The response is `202 ACCEPTED`; scoring happens asynchronously. Use the dashboard, `/api/recent-decisions` on port 3001, or `/api/v1/cases` on port 8081 to inspect results. The authenticated `/api/v1/transactions` endpoint requires a JWT from `/api/v1/auth/login` using the local demo credentials `admin` / `password`.
 
-```bash
-docker-compose up --build
-```
+## Current boundaries
 
----
-
-## 📡 Kafka Topics
-
-| Topic | Purpose | Key |
-|-------|---------|-----|
-| `transactions.raw` | Incoming transactions | userId |
-| `fraud.decisions` | All scored decisions | transactionId |
-| `fraud.alerts` | High-risk alerts (BLOCK/REVIEW) | transactionId |
-| `fraud.dlq` | Failed processing | transactionId |
-
----
-
-## 🔴 Redis Velocity Engine
-
-Sliding window counters with **Lua scripts** for atomic operations:
-
-| Key Pattern | TTL | Purpose |
-|-------------|-----|---------|
-| `txn_count:{userId}:{window}` | 2m | 1-minute transaction count |
-| `amount_sum:{userId}:{window}` | 1h | Hourly amount accumulator |
-| `avg_amount:{userId}` | 24h | EWMA behavioral baseline |
-| `known_devices:{userId}` | 7d | Device fingerprint tracking |
-| `known_locations:{userId}` | 7d | Location history |
-| `merchants:{userId}:{window}` | 1h | Unique merchant tracking |
-
----
-
-## 🤖 C++ ML Service
-
-The ML service uses a **simulated XGBoost ensemble** (5 decision trees) with:
-- **Feature engineering**: sigmoid normalization, log transforms, interaction features
-- **Rule engine**: 5 pre-filter rules (velocity burst, amount threshold, device/location, cumulative, merchant hopping)
-- **Decision logic**: ALLOW (<55%), REVIEW (55-85%), BLOCK (>85%)
-- **Latency target**: 2-4ms per transaction
-
----
-
-## 📊 Fraud Rules
-
-| Rule | Trigger | Action |
-|------|---------|--------|
-| Velocity Burst | >5 txns in 1 minute | BLOCK |
-| High Amount | Single txn > ₹100,000 | REVIEW |
-| Amount Spike | Transaction > 5x user average | REVIEW |
-| New Device + Location | Unknown device AND location | REVIEW |
-| Merchant Hopping | >8 unique merchants in 1 hour | BLOCK |
-| Cumulative High | 1h total > ₹200,000 | REVIEW |
-
----
-
-## ⚡ Latency Budget
-
-| Stage | Target |
-|-------|--------|
-| Kafka ingest | ≤2ms |
-| Redis velocity | ≤1ms |
-| C++ ML inference | ≤4ms |
-| Decision logic | ≤2ms |
-| WebSocket push | ≤3ms |
-| UI render | ≤3ms |
-| **Total** | **≤18ms** |
-
----
-
-## 🧪 Testing Scenarios
-
-### Rahul's Card Clone (Demo Mode)
-```
-node simulator.js --mode demo
-```
-
-Simulates the exact scenario from the problem statement:
-1. Rahul makes normal purchase in Chennai
-2. Card used in Delhi 30 seconds later
-3. Rapid transactions: ₹5K → ₹10K → ₹25K → ₹40K
-4. System blocks within milliseconds
-
----
-
-## 📁 Project Structure
-
-```
-Fraud_Detection_Kafka_cpp/
-├── docker-compose.yml           # Full stack orchestration
-├── proto/
-│   └── fraud_scoring.proto      # Shared gRPC definition
-├── ml-service/                  # C++ ML gRPC Service
-│   ├── CMakeLists.txt
-│   ├── Dockerfile
-│   ├── include/                 # Headers
-│   └── src/                     # Implementation
-├── spring-services/             # Java Spring Boot
-│   ├── pom.xml                  # Parent POM
-│   ├── transaction-gateway/     # REST → Kafka
-│   └── fraud-orchestrator/      # Core fraud engine
-├── websocket-gateway/           # Express.js + WebSocket
-│   └── src/server.js
-├── dashboard/                   # React + Vite
-│   └── src/
-│       ├── App.jsx
-│       ├── index.css
-│       └── hooks/useWebSocket.js
-├── simulator/                   # Transaction simulator
-│   └── simulator.js
-└── infrastructure/
-    └── db/init.sql             # PostgreSQL schema
-```
-
----
-
-## 🔐 Security Considerations
-
-- Service-to-service authentication (mTLS for gRPC)
-- Data encryption at rest (PostgreSQL) and in transit
-- Role-based access for dashboard
-- Idempotency via transaction IDs
-- 
-> Note: Kafka, Redis, and Docker are runtime dependencies and are not committed to the repository. Kafka binaries under `/opt` are for local development only.
-## 📈 Scalability
-
-- **Kafka**: Increase partitions (currently 6)
-- **Spring Boot**: Scale horizontally with consumer groups
-- **Redis**: Redis Cluster for sharding
-- **ML Service**: Load-balanced gRPC with multiple replicas
-
----
-
-Built with ❤️ for real-time fraud detection at scale.
+This is a local development system. Demo credentials, public sandbox/case endpoints, plaintext service traffic, and the Vite development server are not a production security configuration. `BLOCK` records a fraud decision; no bank/payment processor is connected. Kafka/PostgreSQL delivery is not an exactly-once transaction, and the declared `fraud.dlq` topic does not yet have a configured dead-letter handler. See [details.md](details.md) for further limitations.

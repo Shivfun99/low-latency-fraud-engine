@@ -1,98 +1,65 @@
-import { useState, useEffect, useRef, useCallback } from 'react';
-const WS_URL = `ws:
-const RECONNECT_INTERVAL = 3000;
+import { useState, useEffect, useRef } from 'react';
+
 export function useWebSocket() {
   const [connected, setConnected] = useState(false);
-  const [stats, setStats] = useState({
-    totalAlerts: 0,
-    totalDecisions: 0,
-    blockedCount: 0,
-    reviewCount: 0,
-    allowedCount: 0,
-    connectedClients: 0,
-    uptimeSeconds: 0,
-  });
+  const [stats, setStats] = useState({});
   const [alerts, setAlerts] = useState([]);
   const [decisions, setDecisions] = useState([]);
   const wsRef = useRef(null);
-  const reconnectRef = useRef(null);
-  const connect = useCallback(() => {
-    try {
-      const ws = new WebSocket(WS_URL);
+
+  useEffect(() => {
+    let disposed = false;
+    let retryTimer;
+    function connect() {
+      if (disposed) return;
+      const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+      const ws = new WebSocket(
+        import.meta.env.VITE_WS_URL || `${protocol}//${window.location.host}/ws`
+      );
       wsRef.current = ws;
       ws.onopen = () => {
-        console.log('[WS] Connected');
-        setConnected(true);
-        if (reconnectRef.current) {
-          clearInterval(reconnectRef.current);
-          reconnectRef.current = null;
-        }
+        if (!disposed) setConnected(true);
       };
       ws.onmessage = (event) => {
+        if (disposed) return;
         try {
           const msg = JSON.parse(event.data);
-          switch (msg.type) {
-            case 'CONNECTED':
-              if (msg.stats) setStats(msg.stats);
-              if (msg.recentAlerts) setAlerts(msg.recentAlerts);
-              if (msg.recentDecisions) setDecisions(msg.recentDecisions);
-              break;
-            case 'FRAUD_ALERT':
-              setAlerts((prev) => {
-                const index = prev.findIndex(a => a.alert_id === msg.data.alert_id);
-                if (index !== -1) {
-                  const updated = [...prev];
-                  updated[index] = msg.data;
-                  return updated;
-                }
-                return [msg.data, ...prev].slice(0, 50);
-              });
-              break;
-            case 'FRAUD_DECISION':
-              setDecisions((prev) => [msg.data, ...prev].slice(0, 100));
-              break;
-            case 'STATS_UPDATE':
-              if (msg.stats) setStats(msg.stats);
-              break;
-            case 'PONG':
-              break;
-            default:
-              break;
+          if (msg.type === 'CONNECTED') {
+            setStats(msg.stats || {});
+            setAlerts(msg.recentAlerts || []);
+            setDecisions(msg.recentDecisions || []);
+          } else if (msg.type === 'FRAUD_ALERT') {
+            setAlerts((previous) =>
+              [msg.data, ...previous.filter((a) => a.alert_id !== msg.data.alert_id)].slice(0, 50)
+            );
+          } else if (msg.type === 'FRAUD_DECISION') {
+            setDecisions((previous) =>
+              [
+                msg.data,
+                ...previous.filter((d) => d.transaction_id !== msg.data.transaction_id),
+              ].slice(0, 100)
+            );
+          } else if (msg.type === 'STATS_UPDATE' || msg.type === 'STATS') {
+            setStats(msg.stats || {});
           }
-        } catch (e) {
-          console.error('[WS] Parse error:', e);
+        } catch (error) {
+          console.error('[WS] Invalid server message:', error);
         }
       };
       ws.onclose = () => {
-        console.log('[WS] Disconnected');
+        if (disposed) return;
         setConnected(false);
         wsRef.current = null;
-        if (!reconnectRef.current) {
-          reconnectRef.current = setInterval(() => {
-            console.log('[WS] Reconnecting...');
-            connect();
-          }, RECONNECT_INTERVAL);
-        }
+        retryTimer = setTimeout(connect, 3000);
       };
-      ws.onerror = (err) => {
-        console.error('[WS] Error:', err);
-        ws.close();
-      };
-    } catch (e) {
-      console.error('[WS] Connection failed:', e);
+      ws.onerror = () => ws.close();
     }
-  }, []);
-  useEffect(() => {
     connect();
     return () => {
+      disposed = true;
+      clearTimeout(retryTimer);
       if (wsRef.current) wsRef.current.close();
-      if (reconnectRef.current) clearInterval(reconnectRef.current);
     };
-  }, [connect]);
-  const sendMessage = useCallback((msg) => {
-    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-      wsRef.current.send(JSON.stringify(msg));
-    }
   }, []);
-  return { connected, stats, alerts, decisions, sendMessage };
+  return { connected, stats, alerts, decisions };
 }

@@ -1,8 +1,10 @@
 package com.fraudshield.casemanagement.repository;
+
 import com.fraudshield.common.entity.FraudDecisionEntity;
-import org.springframework.data.jpa.repository.JpaRepository;
 import java.util.Optional;
 import java.util.UUID;
+import org.springframework.data.jpa.repository.JpaRepository;
+
 public interface FraudDecisionRepository extends JpaRepository<FraudDecisionEntity, UUID> {
-    Optional<FraudDecisionEntity> findTopByTransactionIdOrderByCreatedAtDesc(UUID transactionId);
+  Optional<FraudDecisionEntity> findTopByTransactionIdOrderByCreatedAtDesc(UUID transactionId);
 }

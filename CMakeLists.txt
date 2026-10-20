@@ -12,7 +12,7 @@ find_package(PkgConfig REQUIRED)
 pkg_check_modules(GRPCPP REQUIRED IMPORTED_TARGET grpc++)
 
 # Proto file location
-set(PROTO_DIR "${ML_SERVICE_DIR}/proto")
+set(PROTO_DIR "${CMAKE_CURRENT_SOURCE_DIR}/proto")
 set(PROTO_FILE "${PROTO_DIR}/fraud_scoring.proto")
 
 # Generated files
@@ -43,45 +43,39 @@ add_custom_command(
     COMMENT "Generating protobuf/gRPC C++ sources from fraud_scoring.proto..."
 )
 
-# ─── Main server executable ─────────────────────────────
-add_executable(fraud_scoring_server
-    "${ML_SERVICE_DIR}/src/main.cpp"
+# Generate and compile the shared protocol once, including in parallel builds.
+add_library(fraud_protocol STATIC ${PROTO_SRC} ${GRPC_SRC})
+target_include_directories(fraud_protocol PUBLIC "${CMAKE_CURRENT_BINARY_DIR}")
+target_link_libraries(fraud_protocol PUBLIC PkgConfig::GRPCPP protobuf Threads::Threads)
+
+add_library(fraud_scoring_core STATIC
     "${ML_SERVICE_DIR}/src/feature_engine.cpp"
     "${ML_SERVICE_DIR}/src/fraud_model.cpp"
     "${ML_SERVICE_DIR}/src/rule_engine.cpp"
     "${ML_SERVICE_DIR}/src/scoring_service.cpp"
-    ${PROTO_SRC}
-    ${GRPC_SRC}
 )
+target_include_directories(fraud_scoring_core PUBLIC "${ML_SERVICE_DIR}/include")
 
-target_include_directories(fraud_scoring_server PRIVATE
-    "${CMAKE_CURRENT_BINARY_DIR}"
-    "${ML_SERVICE_DIR}/include"
+add_library(fraud_grpc_service STATIC
+    "${ML_SERVICE_DIR}/src/grpc_service.cpp"
 )
+target_link_libraries(fraud_grpc_service PUBLIC fraud_scoring_core fraud_protocol)
 
+# ─── Main server executable ─────────────────────────────
+add_executable(fraud_scoring_server "${ML_SERVICE_DIR}/src/main.cpp")
 target_link_libraries(fraud_scoring_server
-    PRIVATE
-    PkgConfig::GRPCPP
-    grpc++_reflection
-    protobuf
-    Threads::Threads
+    PRIVATE fraud_grpc_service grpc++_reflection
 )
 
 # ─── Health check utility ────────────────────────────────
-add_executable(health_check
-    "${ML_SERVICE_DIR}/src/health_check.cpp"
-    ${PROTO_SRC}
-    ${GRPC_SRC}
-)
+add_executable(health_check "${ML_SERVICE_DIR}/src/health_check.cpp")
+target_include_directories(health_check PRIVATE "${ML_SERVICE_DIR}/include")
+target_link_libraries(health_check PRIVATE fraud_protocol)
 
-target_include_directories(health_check PRIVATE
-    "${CMAKE_CURRENT_BINARY_DIR}"
-    "${ML_SERVICE_DIR}/include"
-)
-
-target_link_libraries(health_check
-    PRIVATE
-    PkgConfig::GRPCPP
-    protobuf
-    Threads::Threads
-)
+include(CTest)
+if(BUILD_TESTING)
+    add_executable(scoring_tests "${ML_SERVICE_DIR}/tests/scoring_tests.cpp")
+    target_link_libraries(scoring_tests PRIVATE fraud_grpc_service)
+    add_test(NAME scoring_pipeline_and_grpc COMMAND scoring_tests)
+    set_tests_properties(scoring_pipeline_and_grpc PROPERTIES TIMEOUT 20)
+endif()

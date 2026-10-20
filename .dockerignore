@@ -1,0 +1,13 @@
+.git
+.agents
+.aws
+.codex
+**/node_modules
+**/target
+**/build
+**/dist
+logs
+*.log
+.env
+.env.*
+opt

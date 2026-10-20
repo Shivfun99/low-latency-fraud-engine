@@ -1,6 +1,6 @@
 #!/usr/bin/env node
-const GATEWAY_URL = process.env.GATEWAY_URL || 'http:
-const WS_GATEWAY_URL = process.env.WS_GATEWAY_URL || 'http:
+// Sandbox ingestion still runs the real Kafka -> Redis -> C++ scoring pipeline.
+const GATEWAY_URL = process.env.GATEWAY_URL || 'http://localhost:8080/api/v1/sandbox/ingest';
 const USERS = [
   { id: 'user_rahul_001', name: 'Rahul Sharma', city: 'Chennai', avgSpend: 2500 },
   { id: 'user_priya_002', name: 'Priya Patel', city: 'Mumbai', avgSpend: 5000 },
@@ -23,7 +23,18 @@ const MERCHANTS = [
   { id: 'merchant_pvr', name: 'PVR Cinemas', category: 'ENTERTAINMENT' },
   { id: 'merchant_zara', name: 'Zara India', category: 'FASHION' },
 ];
-const CITIES = ['Chennai', 'Mumbai', 'Delhi', 'Bangalore', 'Kolkata', 'Hyderabad', 'Pune', 'Jaipur', 'Ahmedabad', 'Lucknow'];
+const CITIES = [
+  'Chennai',
+  'Mumbai',
+  'Delhi',
+  'Bangalore',
+  'Kolkata',
+  'Hyderabad',
+  'Pune',
+  'Jaipur',
+  'Ahmedabad',
+  'Lucknow',
+];
 const CHANNELS = ['ONLINE', 'POS', 'UPI', 'ATM', 'MOBILE'];
 const CARD_TYPES = ['VISA', 'MASTERCARD', 'RUPAY', 'AMEX'];
 function randomPick(arr) {
@@ -65,8 +76,8 @@ function velocityAttack(user) {
     merchant_name: merchant.name,
     category: merchant.category,
     card_type: randomPick(CARD_TYPES),
-    location: randomPick(CITIES.filter(c => c !== user.city)), 
-    device_id: generateDeviceId(), 
+    location: randomPick(CITIES.filter((c) => c !== user.city)),
+    device_id: generateDeviceId(),
     ip_address: generateIP(),
     channel: 'POS',
   };
@@ -74,7 +85,7 @@ function velocityAttack(user) {
 function highAmountAnomaly(user) {
   return {
     user_id: user.id,
-    amount: randomAmount(50000, 200000), 
+    amount: randomAmount(50000, 200000),
     currency: 'INR',
     merchant_id: randomPick(MERCHANTS).id,
     merchant_name: 'Luxury Electronics Store',
@@ -101,164 +112,109 @@ function cardTestingPattern(user) {
     channel: 'ONLINE',
   };
 }
-async function sendTransaction(txn, useTestEndpoint = false) {
-  const url = useTestEndpoint ? WS_GATEWAY_URL : GATEWAY_URL;
+function parseOptions(args) {
+  const options = { mode: 'normal', count: null, interval: null };
+  for (let index = 0; index < args.length; index++) {
+    const [key, inlineValue] = args[index].split('=');
+    if (!['--mode', '--count', '--interval'].includes(key))
+      throw new Error(`Unknown option: ${key}`);
+    const value = inlineValue ?? args[++index];
+    if (value == null) throw new Error(`Missing value for ${key}`);
+    options[key.slice(2)] = key === '--mode' ? value : Number(value);
+  }
+  if (!['normal', 'burst', 'fraud', 'demo'].includes(options.mode))
+    throw new Error('Mode must be normal, burst, fraud or demo');
+  if (options.count !== null && (!Number.isSafeInteger(options.count) || options.count < 1))
+    throw new Error('Count must be a positive integer');
+  if (
+    options.interval !== null &&
+    (!Number.isSafeInteger(options.interval) || options.interval < 0)
+  )
+    throw new Error('Interval must be a nonnegative integer in milliseconds');
+  return options;
+}
+
+async function sendTransaction(transaction, url = GATEWAY_URL) {
+  const headers = { 'Content-Type': 'application/json' };
+  if (process.env.API_TOKEN) headers.Authorization = `Bearer ${process.env.API_TOKEN}`;
+  const response = await fetch(url, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify(transaction),
+    signal: AbortSignal.timeout(15000),
+  });
+  const body = await response.text();
+  if (!response.ok) throw new Error(`HTTP ${response.status}: ${body}`);
+  const data = JSON.parse(body);
+  if (!data.transaction_id) throw new Error('Ingestion did not return a transaction_id');
+  console.log(
+    `[${transaction.user_id}] ₹${transaction.amount.toLocaleString()} @ ${transaction.location} -> ${data.transaction_id} (${data.decision || data.status || 'ACCEPTED'})`
+  );
+  return data;
+}
+
+async function run(options) {
+  const plannedCount =
+    options.count ?? (options.mode === 'normal' ? Infinity : options.mode === 'fraud' ? 50 : 14);
+  const interval =
+    options.interval ?? (options.mode === 'normal' ? 1500 : options.mode === 'demo' ? 1000 : 200);
+  console.log(`Fraud transaction simulator: ${options.mode} -> ${GATEWAY_URL}`);
+  console.log(
+    'Transactions are submitted for asynchronous scoring. Watch decisions in the dashboard.'
+  );
+  if (options.mode === 'demo' || options.mode === 'burst') {
+    console.log(
+      'Scenario: normal purchases in Chennai, then a new device in Delhi and rapid transactions.'
+    );
+  }
+  let running = true;
+  const stop = () => {
+    running = false;
+  };
+  process.once('SIGINT', stop);
+  process.once('SIGTERM', stop);
+  let sent = 0;
   try {
-    const response = await fetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(txn),
+    while (running && sent < plannedCount) {
+      let transaction;
+      if (options.mode === 'demo' || options.mode === 'burst') {
+        const user = USERS[0];
+        if (sent < 3) transaction = normalTransaction(user);
+        else if (sent < 9) {
+          transaction = velocityAttack(user);
+          transaction.location = 'Delhi';
+          transaction.amount = [5000, 10000, 25000, 40000, 15000, 8000][(sent - 3) % 6];
+        } else transaction = cardTestingPattern(user);
+      } else {
+        const user = randomPick(USERS);
+        const roll = Math.random();
+        const normalShare = options.mode === 'fraud' ? 0.2 : 0.7;
+        transaction =
+          roll < normalShare
+            ? normalTransaction(user)
+            : randomPick([velocityAttack, highAmountAnomaly, cardTestingPattern])(user);
+      }
+      await sendTransaction(transaction);
+      sent++;
+      if (running && sent < plannedCount && interval)
+        await new Promise((resolve) => setTimeout(resolve, interval));
+    }
+  } finally {
+    process.removeListener('SIGINT', stop);
+    process.removeListener('SIGTERM', stop);
+  }
+  console.log(
+    `Submitted ${sent} transactions. Scoring outcomes are available asynchronously in the live feed.`
+  );
+  return sent;
+}
+
+if (require.main === module) {
+  Promise.resolve()
+    .then(() => run(parseOptions(process.argv.slice(2))))
+    .catch((error) => {
+      console.error(`Simulator failed: ${error.message}`);
+      process.exitCode = 1;
     });
-    if (response.ok) {
-      const data = await response.json();
-      const decision = data.decision || '—';
-      const marker = decision === 'BLOCK' ? '🚫' : decision === 'REVIEW' ? '⚠️' : '✅';
-      console.log(`${marker} [${txn.user_id}] ₹${txn.amount.toLocaleString()} @ ${txn.location} → ${data.transaction_id?.substring(0, 8) || 'sent'}`);
-      return data;
-    } else {
-      console.error(`❌ HTTP ${response.status}: ${response.statusText}`);
-    }
-  } catch (e) {
-    console.error(`❌ Failed: ${e.message}`);
-  }
-  return null;
 }
-async function runNormalMode() {
-  console.log('═══════════════════════════════════════════');
-  console.log('  Transaction Simulator — Normal Mode');
-  console.log('  Sending mixed traffic every 1-3 seconds');
-  console.log('═══════════════════════════════════════════\n');
-  let count = 0;
-  const useTestEndpoint = true; 
-  while (true) {
-    const user = randomPick(USERS);
-    const rand = Math.random();
-    let txn;
-    if (rand < 0.7) {
-      txn = normalTransaction(user);
-    } else if (rand < 0.85) {
-      txn = velocityAttack(user);
-      console.log(`\n🔴 SUSPICIOUS: velocity attack on ${user.name}`);
-    } else if (rand < 0.95) {
-      txn = highAmountAnomaly(user);
-      console.log(`\n🟡 SUSPICIOUS: high amount for ${user.name}`);
-    } else {
-      txn = cardTestingPattern(user);
-      console.log(`\n🟠 SUSPICIOUS: card testing pattern for ${user.name}`);
-    }
-    await sendTransaction(txn, useTestEndpoint);
-    count++;
-    if (count % 10 === 0) {
-      console.log(`\n📊 Sent ${count} transactions\n`);
-    }
-    await sleep(randomAmount(1000, 3000));
-  }
-}
-async function runBurstMode() {
-  console.log('═══════════════════════════════════════════');
-  console.log('  Transaction Simulator — BURST MODE');
-  console.log('  Simulating velocity attack on Rahul');
-  console.log('═══════════════════════════════════════════\n');
-  const victim = USERS[0]; 
-  console.log(`🎯 Target: ${victim.name} (${victim.id})`);
-  console.log(`📍 Home city: ${victim.city}\n`);
-  console.log('─── Phase 1: Normal activity ─────────────\n');
-  for (let i = 0; i < 3; i++) {
-    await sendTransaction(normalTransaction(victim), true);
-    await sleep(500);
-  }
-  await sleep(2000);
-  console.log('\n─── Phase 2: ATTACK — Rapid transactions ──\n');
-  const amounts = [5000, 10000, 25000, 40000, 15000, 8000];
-  for (const amount of amounts) {
-    const attack = velocityAttack(victim);
-    attack.amount = amount;
-    await sendTransaction(attack, true);
-    await sleep(200);
-  }
-  await sleep(2000);
-  console.log('\n─── Phase 3: Card testing pattern ─────────\n');
-  for (let i = 0; i < 5; i++) {
-    await sendTransaction(cardTestingPattern(victim), true);
-    await sleep(150);
-  }
-  console.log('\n═══════════════════════════════════════════');
-  console.log('  Burst simulation complete!');
-  console.log('═══════════════════════════════════════════');
-}
-async function runFraudMode() {
-  console.log('═══════════════════════════════════════════');
-  console.log('  Transaction Simulator — FRAUD MODE');
-  console.log('  80% fraudulent, 20% legitimate');
-  console.log('═══════════════════════════════════════════\n');
-  let count = 0;
-  while (count < 50) {
-    const user = randomPick(USERS);
-    const rand = Math.random();
-    let txn;
-    if (rand < 0.2) {
-      txn = normalTransaction(user);
-    } else if (rand < 0.5) {
-      txn = velocityAttack(user);
-    } else if (rand < 0.8) {
-      txn = highAmountAnomaly(user);
-    } else {
-      txn = cardTestingPattern(user);
-    }
-    await sendTransaction(txn, true);
-    count++;
-    await sleep(500);
-  }
-  console.log(`\n📊 Sent ${count} fraud-heavy transactions`);
-}
-async function runDemoMode() {
-  console.log('═══════════════════════════════════════════');
-  console.log('  🎬 LIVE DEMO — Fraud Detection System');
-  console.log('═══════════════════════════════════════════\n');
-  const rahul = USERS[0];
-  const useTestEndpoint = false; 
-  console.log('📖 Story: Rahul\'s card has been cloned.');
-  console.log('   The attacker is in Delhi, Rahul is in Chennai.\n');
-  await sleep(3000);
-  console.log('Step 1: Rahul makes a normal purchase in Chennai...\n');
-  await sendTransaction(normalTransaction(rahul), useTestEndpoint);
-  await sleep(3000);
-  console.log('\nStep 2: 30 seconds later, card used in DELHI!\n');
-  const attack1 = velocityAttack(rahul);
-  attack1.amount = 5000;
-  attack1.location = 'Delhi';
-  await sendTransaction(attack1, useTestEndpoint);
-  await sleep(2000);
-  console.log('\nStep 3: Rapid transactions follow...\n');
-  for (const amount of [10000, 25000, 40000]) {
-    const atk = velocityAttack(rahul);
-    atk.amount = amount;
-    atk.location = 'Delhi';
-    await sendTransaction(atk, useTestEndpoint);
-    await sleep(500);
-  }
-  await sleep(2000);
-  console.log('\n✅ System should have detected and BLOCKED these transactions!');
-  console.log('Total attempted fraud: ₹80,000');
-  console.log('\n═══════════════════════════════════════════');
-}
-function sleep(ms) {
-  return new Promise(resolve => setTimeout(resolve, ms));
-}
-const mode = process.argv.find(a => a.startsWith('--mode'))?.split('=')[1] ||
-             process.argv[process.argv.indexOf('--mode') + 1] ||
-             'normal';
-console.log(`\n🚀 Starting simulator in "${mode}" mode...\n`);
-switch (mode) {
-  case 'burst':
-    runBurstMode();
-    break;
-  case 'fraud':
-    runFraudMode();
-    break;
-  case 'demo':
-    runDemoMode();
-    break;
-  default:
-    runNormalMode();
-}
+module.exports = { parseOptions, sendTransaction, run };

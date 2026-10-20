@@ -1,354 +1,484 @@
-import { useState, useEffect, useMemo } from 'react';
-import { motion, AnimatePresence, LayoutGroup } from 'framer-motion';
-import { 
-  Shield, 
-  AlertTriangle, 
-  CheckCircle, 
-  Ban, 
-  Activity, 
-  Users, 
-  Zap, 
-  Flame, 
-  Search, 
-  Filter, 
-  TrendingUp, 
-  MapPin, 
-  Clock, 
-  User, 
-  MoreVertical,
-  ChevronRight,
+import { useMemo, useState } from 'react';
+import {
+  Shield,
+  AlertTriangle,
+  CheckCircle,
+  Ban,
+  Activity,
+  Users,
+  Zap,
+  MapPin,
+  Clock,
   RefreshCw,
-  Globe
 } from 'lucide-react';
-import { 
-  AreaChart, 
-  Area, 
-  XAxis, 
-  YAxis, 
-  CartesianGrid, 
-  Tooltip, 
-  ResponsiveContainer 
-} from 'recharts';
 import { useWebSocket } from './hooks/useWebSocket';
-const formatAmount = (amount) => {
-  if (amount == null) return '₹0';
-  return '₹' + Number(amount).toLocaleString('en-IN');
+
+const amountText = (amount) => `₹${Number(amount || 0).toLocaleString('en-IN')}`;
+const scoreText = (score) => `${(Number(score || 0) * 100).toFixed(1)}%`;
+const timeText = (value) => (value ? new Date(value).toLocaleTimeString() : '—');
+const baseTransaction = {
+  user_id: 'dashboard_demo_user',
+  amount: 2500,
+  currency: 'INR',
+  merchant_id: 'merchant_demo',
+  merchant_name: 'Demo Store',
+  category: 'ECOMMERCE',
+  location: 'Chennai',
+  device_id: 'dashboard_primary_device',
+  channel: 'ONLINE',
 };
-const formatScore = (score) => {
-  if (score == null) return '0.0%';
-  return (score * 100).toFixed(1) + '%';
+const templates = {
+  'Normal purchase': baseTransaction,
+  'High amount': { ...baseTransaction, amount: 150000 },
+  'New device / city': {
+    ...baseTransaction,
+    amount: 40000,
+    location: 'Delhi',
+    device_id: 'unknown_device',
+  },
 };
-const formatTime = (ts) => {
-  if (!ts) return '';
-  const d = new Date(ts);
-  return d.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
-};
-const getRiskColor = (score) => {
-  if (score >= 0.7) return 'var(--danger)';
-  if (score >= 0.4) return 'var(--warning)';
-  return 'var(--success)';
-};
-const StatCard = ({ icon: Icon, value, label, variant, trend }) => (
-  <motion.div 
-    whileHover={{ y: -4 }}
-    className={`glass-panel stat-card ${variant}`}
-  >
-    <div className="stat-card-icon">
-      <Icon size={24} />
-    </div>
-    <div className="stat-value">{value}</div>
-    <div className="stat-label">{label}</div>
-    {trend && (
-      <div className="stat-trend" style={{ color: trend > 0 ? 'var(--success-bright)' : 'var(--danger-bright)' }}>
-        <TrendingUp size={12} style={{ transform: trend < 0 ? 'rotate(180deg)' : 'none' }} />
-        {Math.abs(trend)}% from last hr
-      </div>
-    )}
-  </motion.div>
-);
-const RiskFactor = ({ label, value, icon: Icon, color }) => (
-  <div className="risk-factor-item">
-    <div className="factor-header">
-      <div className="factor-info">
-        <Icon size={14} style={{ color }} />
-        <span className="factor-label">{label}</span>
-      </div>
-      <span className="factor-value" style={{ color }}>{formatScore(value)}</span>
-    </div>
-    <div className="factor-bar-bg">
-      <motion.div 
-        initial={{ width: 0 }}
-        animate={{ width: `${(value || 0) * 100}%` }}
-        style={{ backgroundColor: color }}
-        className="factor-bar-fill"
-      />
-    </div>
-  </div>
-);
-const AlertCard = ({ alert, isActive, onClick }) => {
-  const score = alert.risk_score || 0;
-  const severity = alert.severity || 'MEDIUM';
+
+async function postJson(path, body) {
+  const response = await fetch(path, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  const text = await response.text();
+  let data;
+  try {
+    data = JSON.parse(text);
+  } catch {
+    data = { message: text };
+  }
+  if (!response.ok)
+    throw new Error(data.message || data.error || `Request failed (${response.status})`);
+  return data;
+}
+
+function StatCard({ icon: Icon, value, label }) {
   return (
-    <motion.div
-      layout
-      initial={{ opacity: 0, y: 20 }}
-      animate={{ opacity: 1, y: 0 }}
-      exit={{ opacity: 0, scale: 0.95 }}
-      whileHover={{ scale: 1.01, backgroundColor: 'var(--bg-card-hover)' }}
-      whileTap={{ scale: 0.98 }}
-      onClick={onClick}
-      className={`alert-card severity-${severity} ${isActive ? 'active' : ''}`}
-    >
-      <div className="alert-card-header">
-        <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px' }}>
-          <span className={`badge ${alert.decision === 'BLOCK' ? 'badge-danger' : 'badge-warning'}`}>
-            {alert.decision}
-          </span>
-          <span className={`badge ${severity === 'CRITICAL' ? 'badge-danger' : 'badge-info'}`}>
-            {severity}
-          </span>
-          {alert.is_sandbox && (
-            <span className="badge sandbox-badge">SANDBOX</span>
-          )}
-        </div>
-        <div className="alert-time">
-          <Clock size={12} /> {formatTime(alert.timestamp)}
-        </div>
-      </div>
-      <div className="alert-body">
-        <div className="alert-main-info">
-          <div className="user-info">
-            <User size={14} className="text-muted" />
-            <span className="mono">{alert.user_id}</span>
+    <div className="glass-panel stat-card">
+      <Icon size={23} />
+      <strong>{value || 0}</strong>
+      <span>{label}</span>
+    </div>
+  );
+}
+function Badge({ decision }) {
+  return <span className={`badge ${decision || ''}`}>{decision || 'PENDING'}</span>;
+}
+function RiskFactor({ label, value }) {
+  return (
+    <div className="risk-factor">
+      <span>
+        {label}
+        <strong>{scoreText(value)}</strong>
+      </span>
+      <progress max="1" value={Math.min(1, Math.max(0, Number(value || 0)))} />
+    </div>
+  );
+}
+
+export default function App() {
+  const { connected, stats, alerts, decisions } = useWebSocket();
+  const [tab, setTab] = useState('monitor');
+  const [query, setQuery] = useState('');
+  const [filter, setFilter] = useState('ALL');
+  const [selectedId, setSelectedId] = useState(null);
+  const [processing, setProcessing] = useState(false);
+  const [notification, setNotification] = useState(null);
+  const [payload, setPayload] = useState(JSON.stringify(baseTransaction, null, 2));
+  const [logs, setLogs] = useState([]);
+  const [caseUpdates, setCaseUpdates] = useState({});
+  const selected = alerts.find((alert) => alert.alert_id === selectedId);
+  const selectedAlert = selected ? { ...selected, ...caseUpdates[selected.alert_id] } : null;
+  const filtered = useMemo(
+    () =>
+      alerts.filter(
+        (alert) =>
+          (filter === 'ALL' || alert.decision === filter) &&
+          `${alert.user_id} ${alert.transaction_id} ${alert.location}`
+            .toLowerCase()
+            .includes(query.toLowerCase())
+      ),
+    [alerts, query, filter]
+  );
+
+  async function submitTransaction() {
+    setNotification(null);
+    setProcessing(true);
+    try {
+      const transaction = JSON.parse(payload);
+      const result = await postJson('/api/v1/sandbox/ingest', transaction);
+      setLogs((previous) =>
+        [{ ...result, submittedAt: new Date().toISOString() }, ...previous].slice(0, 20)
+      );
+      setNotification({
+        message: 'Transaction accepted. Its decision will arrive in the live feed.',
+      });
+    } catch (error) {
+      setNotification({ error: true, message: error.message });
+    } finally {
+      setProcessing(false);
+    }
+  }
+  async function handleAction(action) {
+    if (!selectedAlert?.actionable) return;
+    setProcessing(true);
+    setNotification(null);
+    try {
+      const result = await postJson(`/api/v1/cases/${selectedAlert.transaction_id}/action`, {
+        action,
+        analyst_id: 'dashboard-user',
+        notes: `Recorded from dashboard: ${action}`,
+      });
+      setCaseUpdates((previous) => ({
+        ...previous,
+        [selectedAlert.alert_id]: {
+          status: result.status || result.alert_status || 'RESOLVED',
+          actionable: false,
+        },
+      }));
+      setNotification({ message: `${action} recorded for this case.` });
+    } catch (error) {
+      setNotification({ error: true, message: error.message });
+    } finally {
+      setProcessing(false);
+    }
+  }
+
+  return (
+    <div className="app">
+      <header className="header">
+        <div className="brand">
+          <Shield size={30} />
+          <div>
+            <h1>Fraud Shield</h1>
+            <span>Real-time transaction monitoring</span>
           </div>
-          <div className="amount-info">{formatAmount(alert.amount)}</div>
         </div>
-      <AnimatePresence>
+        <div className={`connection ${connected ? 'online' : 'offline'}`}>
+          <span className="status-dot" />
+          {connected ? 'Live connection' : 'Connecting to gateway…'}
+        </div>
+      </header>
+      <main className="main-content">
+        <nav className="tabs" aria-label="Workspace">
+          <button className={tab === 'monitor' ? 'active' : ''} onClick={() => setTab('monitor')}>
+            <Activity size={17} /> Live monitor
+          </button>
+          <button className={tab === 'test' ? 'active' : ''} onClick={() => setTab('test')}>
+            <Zap size={17} /> Test transactions
+          </button>
+        </nav>
         {notification && (
-          <motion.div 
-            initial={{ opacity: 0, y: -50, x: '-50%' }}
-            animate={{ opacity: 1, y: 20 }}
-            exit={{ opacity: 0, scale: 0.5 }}
-            style={{ 
-              position: 'fixed', left: '50%', zIndex: 5000, 
-              padding: '12px 24px', borderRadius: '8px',
-              backgroundColor: notification.type === 'error' ? 'var(--danger)' : 'var(--success-bright)',
-              color: 'white', fontWeight: 700, boxShadow: '0 10px 40px rgba(0,0,0,0.5)',
-              display: 'flex', alignItems: 'center', gap: '8px'
-            }}
+          <div
+            role={notification.error ? 'alert' : 'status'}
+            className={`notice ${notification.error ? 'error' : ''}`}
           >
-            {notification.type === 'error' ? <AlertTriangle size={18} /> : <CheckCircle size={18} />}
-            {notification.message}
-          </motion.div>
+            {notification.error ? <AlertTriangle size={18} /> : <CheckCircle size={18} />}
+            <span>{notification.message}</span>
+            <button aria-label="Dismiss message" onClick={() => setNotification(null)}>
+              ×
+            </button>
+          </div>
         )}
-      </AnimatePresence>
+        {tab === 'monitor' ? (
+          <>
             <div className="stats-grid">
-              <StatCard icon={AlertTriangle} value={stats.totalAlerts} label="Security Alerts" variant="danger" trend={12} />
-              <StatCard icon={Ban} value={stats.blockedCount} label="Blocked Items" variant="danger" />
-              <StatCard icon={Activity} value={stats.totalDecisions || 0} label="Processed Req" variant="info" trend={5} />
-              <StatCard icon={Users} value={stats.connectedClients || 1} label="Active Analysts" variant="info" />
+              <StatCard icon={Activity} value={stats.totalDecisions} label="Scored transactions" />
+              <StatCard icon={AlertTriangle} value={stats.totalAlerts} label="Alerts received" />
+              <StatCard icon={Ban} value={stats.blockedCount} label="Block decisions" />
+              <StatCard icon={Users} value={stats.connectedClients} label="Connected dashboards" />
             </div>
-                <div className="glass-panel" style={{ padding: '20px 28px', display: 'flex', gap: '24px', flexWrap: 'wrap' }}>
-                  <div className="live-indicator"><div className="pulse-dot" /> KAFKA: READY</div>
-                  <div className="live-indicator" style={{ color: 'var(--accent-purple)', borderColor: 'var(--accent-purple)' }}>
-                    <div className="pulse-dot" style={{ background: 'var(--accent-purple)' }} /> REDIS: SYNCED
-                  </div>
-                  <div className="live-indicator" style={{ color: 'var(--accent-cyan)', borderColor: 'var(--accent-cyan)' }}>
-                    <div className="pulse-dot" style={{ background: 'var(--accent-cyan)' }} /> ML-ENGINE: V1.2
-                  </div>
-                </div>
-                <div className="glass-panel">
+            <div className="pipeline-status">
+              <span className={`status-dot ${stats.kafkaConnected ? 'online' : 'offline'}`} />
+              Kafka consumer: {connected && stats.kafkaConnected ? 'connected' : 'not connected'}
+              <span className="muted">
+                Counters cover this gateway session. Test traffic is marked SANDBOX.
+              </span>
+            </div>
+            <div className="dashboard-grid">
+              <div className="stack">
+                <section className="glass-panel">
                   <div className="panel-header">
-                    <div className="panel-title">
-                      <Flame size={18} color="var(--danger)" /> Intelligence Feed
-                    </div>
-                    <div style={{ display: 'flex', gap: '12px' }}>
-                      <div className="live-indicator" style={{ background: 'transparent', border: 'none' }}>
-                        <div className="pulse-dot" style={{ backgroundColor: 'var(--danger)' }} />
+                    <h2>
+                      <AlertTriangle size={19} /> Alert feed
+                    </h2>
+                    <span className="muted">{filtered.length} recent</span>
+                  </div>
+                  <div className="filters">
+                    <input
+                      aria-label="Search alerts"
+                      placeholder="Search user, transaction or city"
+                      value={query}
+                      onChange={(event) => setQuery(event.target.value)}
+                    />
+                    <select
+                      aria-label="Filter decision"
+                      value={filter}
+                      onChange={(event) => setFilter(event.target.value)}
+                    >
+                      <option value="ALL">All decisions</option>
+                      <option>BLOCK</option>
+                      <option>REVIEW</option>
+                    </select>
+                  </div>
+                  <div className="alert-feed">
+                    {filtered.length === 0 ? (
+                      <div className="empty-state">
+                        <Shield size={36} />
+                        <p>No matching alerts yet.</p>
+                        <span>Submit a test transaction to exercise the pipeline.</span>
                       </div>
-                    </div>
+                    ) : (
+                      filtered.map((alert) => (
+                        <button
+                          className={`alert-card ${selectedId === alert.alert_id ? 'selected' : ''}`}
+                          key={alert.alert_id}
+                          onClick={() => setSelectedId(alert.alert_id)}
+                        >
+                          <div className="alert-card-header">
+                            <div className="badges">
+                              <Badge decision={alert.decision} />
+                              {alert.is_sandbox && <span className="badge sandbox">SANDBOX</span>}
+                              {alert.source === 'simulated' && (
+                                <span className="badge sandbox">SYNTHETIC</span>
+                              )}
+                            </div>
+                            <span className="muted">{timeText(alert.timestamp)}</span>
+                          </div>
+                          <div className="alert-summary">
+                            <strong>{alert.user_id}</strong>
+                            <strong>{amountText(alert.amount)}</strong>
+                          </div>
+                          <div className="alert-card-footer">
+                            <span>
+                              <MapPin size={13} />
+                              {alert.location || 'Unknown location'}
+                            </span>
+                            <span>Risk {scoreText(alert.risk_score)}</span>
+                          </div>
+                        </button>
+                      ))
+                    )}
                   </div>
-                  <div className="panel-body alert-feed">
-                    <AnimatePresence>
-                      {alerts.length === 0 ? (
-                        <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="empty-state">
-                          <Shield size={48} style={{ opacity: 0.2, marginBottom: '16px' }} />
-                          <p>Monitoring network for threats...</p>
-                        </motion.div>
-                      ) : (
-                        alerts.map((alert) => (
-                          <AlertCard 
-                            key={alert.alert_id} 
-                            alert={alert} 
-                            isActive={selectedAlert?.alert_id === alert.alert_id}
-                            onClick={() => setSelectedAlert(alert)}
-                          />
-                        ))
-                      )}
-                    </AnimatePresence>
-                  </div>
-                </div>
-              </div>
-              <div style={{ display: 'flex', flexDirection: 'column', gap: '32px' }}>
-                <div className="glass-panel" style={{ flex: 1 }}>
+                </section>
+                <section className="glass-panel">
                   <div className="panel-header">
-                    <div className="panel-title"><Activity size={18} color="var(--accent-cyan)" /> Activity Journal</div>
+                    <h2>
+                      <Activity size={19} /> Recent decisions
+                    </h2>
                   </div>
-                  <div className="panel-body" style={{ padding: 0 }}>
-                    <table className="txn-table">
-                      <tbody>
-                        <AnimatePresence initial={false}>
-                          {decisions.slice(0, 12).map((txn) => (
-                            <motion.tr 
-                              key={txn.transaction_id}
-                              layout
-                              initial={{ opacity: 0 }}
-                              animate={{ opacity: 1 }}
-                              className="txn-row"
-                            >
-                              <td className={`txn-indicator ${txn.decision}`}></td>
-                              <td className="txn-main">
-                                <span className="txn-user">{txn.user_id}</span>
-                                <span className="txn-id">{txn.transaction_id.slice(0, 8)}...</span>
-                              </td>
-                              <td className="txn-amount">{formatAmount(txn.amount)}</td>
+                  {decisions.length === 0 ? (
+                    <p className="empty-state">Waiting for scored transactions…</p>
+                  ) : (
+                    <div className="table-scroll">
+                      <table>
+                        <thead>
+                          <tr>
+                            <th>User / transaction</th>
+                            <th>Amount</th>
+                            <th>Decision</th>
+                            <th>Risk</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {decisions.slice(0, 15).map((transaction) => (
+                            <tr key={transaction.transaction_id}>
                               <td>
-                                <div className="txn-score-badge" style={{ 
-                                  background: getRiskColor(txn.risk_score) + '20',
-                                  color: getRiskColor(txn.risk_score)
-                                }}>
-                                  {(txn.risk_score * 100).toFixed(0)}%
-                                </div>
+                                {transaction.user_id}
+                                <small className="mono">
+                                  {transaction.transaction_id?.slice(0, 12)}
+                                </small>
                               </td>
-                            </motion.tr>
+                              <td>{amountText(transaction.amount)}</td>
+                              <td>
+                                <Badge decision={transaction.decision} />
+                              </td>
+                              <td>{scoreText(transaction.risk_score)}</td>
+                            </tr>
                           ))}
-                        </AnimatePresence>
-                      </tbody>
-                    </table>
-                  </div>
-                </div>
-                        <div className="rationale-section">
-                          <h4 className="section-title">Triggered Intelligence</h4>
-                          <div className="rules-list">
-                            {(selectedAlert.triggered_rules || []).map(rule => (
-                               <div key={rule} className="rule-item">
-                                 <AlertTriangle size={14} color="var(--warning)" />
-                                 <span>{rule}</span>
-                               </div>
-                            ))}
-                            {(selectedAlert.triggered_rules || []).length === 0 && (
-                              <p className="text-dim" style={{ fontSize: '11px' }}>No specific rules triggered. Pure ML inference.</p>
-                            )}
-                          </div>
-                        </div>
-                        <div className="divider" />
-                        <div className="rationale-section">
-                          <h4 className="section-title">Enriched Metadata</h4>
-                          <div className="metadata-compact">
-                            <div className="meta-row"><span>Merchant</span> <span className="highlight-text">{selectedAlert.merchant_name || 'Unknown'}</span></div>
-                            <div className="meta-row"><span>Category</span> <span>{selectedAlert.category}</span></div>
-                            <div className="meta-row"><span>Device</span> <span className="mono">{selectedAlert.device_id}</span></div>
-                            <div className="meta-row"><span>IP Addr</span> <span className="mono">{selectedAlert.ip_address}</span></div>
-                          </div>
-                        </div>
-                        <div className="action-buttons-container">
-                          <button className="btn btn-danger" style={{ flex: 1 }} onClick={() => handleAction('Block', selectedAlert)} disabled={processing}>
-                            {processing ? <RefreshCw className="animate-spin" size={16} /> : <Ban size={16} />} 
-                            Block Entity
-                          </button>
-                          <button className="btn btn-secondary" style={{ flex: 1 }} onClick={() => handleAction('Approve', selectedAlert)} disabled={processing}>
-                            {processing ? <RefreshCw className="animate-spin" size={16} /> : <CheckCircle size={16} />} 
-                            Safe / Dismiss
-                          </button>
-                        </div>
-                      </div>
-                    </motion.div>
+                        </tbody>
+                      </table>
+                    </div>
                   )}
-                </AnimatePresence>
+                </section>
               </div>
+              <aside className="glass-panel detail-panel">
+                <div className="panel-header">
+                  <h2>
+                    <Shield size={19} /> Alert details
+                  </h2>
+                </div>
+                {!selectedAlert ? (
+                  <div className="empty-state">
+                    <Shield size={36} />
+                    <p>Select an alert to inspect its risk factors.</p>
+                  </div>
+                ) : (
+                  <div className="panel-body stack">
+                    <div className="detail-score">
+                      <strong>{scoreText(selectedAlert.risk_score)}</strong>
+                      <Badge decision={selectedAlert.decision} />
+                    </div>
+                    <p>
+                      {selectedAlert.description ||
+                        'Risk assessment from the fraud scoring pipeline.'}
+                    </p>
+                    <div className="metadata">
+                      <span>
+                        User<strong>{selectedAlert.user_id}</strong>
+                      </span>
+                      <span>
+                        Amount<strong>{amountText(selectedAlert.amount)}</strong>
+                      </span>
+                      <span>
+                        Location<strong>{selectedAlert.location || '—'}</strong>
+                      </span>
+                      <span>
+                        Status<strong>{selectedAlert.status}</strong>
+                      </span>
+                      <span>
+                        Processing time
+                        <strong>
+                          {selectedAlert.processing_time_ms == null
+                            ? '—'
+                            : `${selectedAlert.processing_time_ms} ms`}
+                        </strong>
+                      </span>
+                    </div>
+                    <div>
+                      <h3>Risk factors</h3>
+                      <RiskFactor label="Velocity" value={selectedAlert.velocity_score} />
+                      <RiskFactor
+                        label="Location anomaly"
+                        value={selectedAlert.geo_anomaly_score}
+                      />
+                      <RiskFactor
+                        label="Amount anomaly"
+                        value={selectedAlert.amount_anomaly_score}
+                      />
+                    </div>
+                    <div>
+                      <h3>Triggered rules</h3>
+                      {selectedAlert.triggered_rules?.length ? (
+                        <ul className="rules-list">
+                          {selectedAlert.triggered_rules.map((rule) => (
+                            <li key={rule}>{rule}</li>
+                          ))}
+                        </ul>
+                      ) : (
+                        <p className="muted">No explicit rules were reported.</p>
+                      )}
+                    </div>
+                    <div>
+                      <h3>Analyst action</h3>
+                      <p className="muted">Records the case outcome in the audit log.</p>
+                      <div className="action-buttons">
+                        <button
+                          className="btn danger"
+                          disabled={processing || !selectedAlert.actionable}
+                          onClick={() => handleAction('BLOCK')}
+                        >
+                          <Ban size={15} /> Confirm block
+                        </button>
+                        <button
+                          className="btn secondary"
+                          disabled={processing || !selectedAlert.actionable}
+                          onClick={() => handleAction('APPROVE')}
+                        >
+                          <CheckCircle size={15} /> Approve
+                        </button>
+                      </div>
+                      {!selectedAlert.actionable && (
+                        <p className="muted">
+                          This alert is resolved or is a synthetic display test.
+                        </p>
+                      )}
+                    </div>
+                    <small className="mono muted">
+                      Transaction: {selectedAlert.transaction_id}
+                    </small>
+                  </div>
+                )}
+              </aside>
             </div>
           </>
         ) : (
-          <div className="sandbox-workspace">
-            <div className="glass-panel main-sandbox">
-              <div className="panel-header">
-                <div className="panel-title"><Zap size={18} color="var(--accent-yellow)" /> Smart Ingestion Console</div>
-                <div className="badge badge-info">TESTING ENVIRONMENT</div>
-              </div>
-              <div className="panel-body">
-                <div className="sandbox-grid">
-                  <div className="editor-side">
-                    <div className="template-selector">
-                      <span className="filter-label">Quick Templates</span>
-                      <div className="template-btns">
-                        {Object.keys(SANDBOX_TEMPLATES).map(key => (
-                          <button key={key} className="btn-micro" onClick={() => loadTemplate(key)}>
-                            {key.replace('_', ' ')}
-                          </button>
-                        ))}
-                      </div>
-                    </div>
-                    <div className="editor-container">
-                      <div className="editor-header">
-                        <span className="mono">payload.json</span>
-                        <div className="editor-actions">
-                          <button className="btn-icon" onClick={() => setSandboxPayload(JSON.stringify(JSON.parse(sandboxPayload), null, 2))}><RefreshCw size={12} /></button>
-                        </div>
-                      </div>
-                      <textarea 
-                        className="sandbox-editor mono" 
-                        value={sandboxPayload}
-                        onChange={(e) => setSandboxPayload(e.target.value)}
-                        placeholder="{ ... }"
-                      />
-                    </div>
-                    <button className="btn btn-primary btn-full" onClick={sendSandboxTxn} disabled={processing}>
-                      {processing ? <RefreshCw className="animate-spin" size={16} /> : <Zap size={16} />}
-                      Deploy to Kafka Pipeline
+          <section className="glass-panel">
+            <div className="panel-header">
+              <h2>
+                <Zap size={19} /> Test the full pipeline
+              </h2>
+              <span className="badge sandbox">SANDBOX</span>
+            </div>
+            <div className="panel-body sandbox-grid">
+              <div className="stack">
+                <p>
+                  Send a synthetic transaction through Kafka, Redis and the scoring service. The
+                  resulting decision appears in the live monitor.
+                </p>
+                <div className="template-buttons">
+                  {Object.entries(templates).map(([name, transaction]) => (
+                    <button
+                      className="btn secondary"
+                      key={name}
+                      onClick={() => setPayload(JSON.stringify(transaction, null, 2))}
+                    >
+                      {name}
                     </button>
-                  </div>
-                  <div className="info-side">
-                    <div className="config-card">
-                      <div className="filter-label">X-Sandbox-Key</div>
-                      <div className="key-display">
-                        <code className="mono">sbx_live_55214488</code>
-                        <div className="status-indicator">ACTIVE</div>
-                      </div>
-                    </div>
-                    <div className="log-card">
-                      <div className="card-header">
-                        <span className="filter-label">Pipeline Logs</span>
-                        <div className="badge-dot">Live</div>
-                      </div>
-                      <div className="log-feed">
-                        {sandboxLogs.map(log => (
-                          <motion.div 
-                            initial={{ opacity: 0, x: 10 }}
-                            animate={{ opacity: 1, x: 0 }}
-                            key={log.id} 
-                            className="log-item"
-                          >
-                            <div className="log-meta">
-                              <span className="log-status">SUCCESS</span>
-                              <span className="log-time">{log.time}</span>
-                            </div>
-                            <div className="log-details mono">
-                              TXN: {log.id.slice(0, 12)}...
-                            </div>
-                          </motion.div>
-                        ))}
-                        {sandboxLogs.length === 0 && (
-                          <div className="empty-logs">
-                            <Clock size={24} className="text-dim" />
-                            <p>Waiting for ingestion...</p>
-                          </div>
-                        )}
-                      </div>
-                    </div>
-                  </div>
+                  ))}
                 </div>
+                <label htmlFor="transaction-payload">Transaction JSON</label>
+                <textarea
+                  id="transaction-payload"
+                  spellCheck="false"
+                  className="mono"
+                  value={payload}
+                  onChange={(event) => setPayload(event.target.value)}
+                />
+                <button className="btn primary" disabled={processing} onClick={submitTransaction}>
+                  {processing ? <RefreshCw size={16} className="spin" /> : <Zap size={16} />} Submit
+                  transaction
+                </button>
+              </div>
+              <div>
+                <h3>Submitted transactions</h3>
+                <p className="muted">
+                  Acceptance confirms ingestion; decisions arrive asynchronously.
+                </p>
+                {logs.length === 0 ? (
+                  <div className="empty-state">
+                    <Clock size={30} />
+                    <p>No transactions submitted yet.</p>
+                  </div>
+                ) : (
+                  logs.map((log) => {
+                    const decision = decisions.find(
+                      (item) => item.transaction_id === log.transaction_id
+                    );
+                    return (
+                      <div className="submission" key={log.transaction_id}>
+                        <div>
+                          <Badge decision={decision?.decision || 'PENDING'} />
+                          <span className="muted">{timeText(log.submittedAt)}</span>
+                        </div>
+                        <code>{log.transaction_id}</code>
+                      </div>
+                    );
+                  })
+                )}
               </div>
             </div>
-          </div>
+          </section>
         )}
+        <footer>
+          Fraud Shield · Demonstration engine · Scores are advisory; no payment processor is
+          connected.
+        </footer>
       </main>
+    </div>
+  );
+}

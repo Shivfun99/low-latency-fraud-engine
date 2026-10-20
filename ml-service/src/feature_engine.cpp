@@ -1,43 +1,40 @@
+#include "cp_template.h"
 #include "feature_engine.h"
-#include <iostream>
-#include <cmath>
+
 namespace fraud {
-FeatureEngine::FeatureEngine() {
-    std::cout << "[FeatureEngine] Initialized" << std::endl;
-}
-NormalizedFeatures FeatureEngine::extractFeatures(
-    const TransactionContext& txn,
-    const VelocityFeatures& velocity)
-{
-    NormalizedFeatures nf;
-    nf.velocity_1m = normalize(velocity.txn_count_1m, 0, VELOCITY_1M_HIGH);
-    nf.velocity_10m = normalize(velocity.txn_count_10m, 0, VELOCITY_10M_HIGH);
-    nf.velocity_1h = normalize(velocity.txn_count_1h, 0, VELOCITY_1H_HIGH);
-    nf.combined_velocity = 0.5 * nf.velocity_1m +
-                           0.3 * nf.velocity_10m +
-                           0.2 * nf.velocity_1h;
-    nf.combined_velocity = std::min(1.0, nf.combined_velocity);
+FeatureEngine::FeatureEngine() { cout << "[FeatureEngine] Initialized" << endl; }
+
+NormalizedFeatures FeatureEngine::extractFeatures(const TransactionContext &txn,
+                                                  const VelocityFeatures &velocity) {
+    NormalizedFeatures features;
+    features.txn_count_1m = velocity.txn_count_1m;
+    features.velocity_1m = normalize(velocity.txn_count_1m, 0, VELOCITY_1M_HIGH);
+    features.velocity_10m = normalize(velocity.txn_count_10m, 0, VELOCITY_10M_HIGH);
+    features.velocity_1h = normalize(velocity.txn_count_1h, 0, VELOCITY_1H_HIGH);
+    features.combined_velocity =
+        0.5 * features.velocity_1m + 0.3 * features.velocity_10m + 0.2 * features.velocity_1h;
+    features.combined_velocity = min(1.0, features.combined_velocity);
     if (velocity.avg_amount > 0) {
-        nf.amount_ratio = txn.amount / velocity.avg_amount;
-        nf.amount_zscore = (txn.amount - velocity.avg_amount) /
-                           std::max(velocity.amount_deviation, 1.0);
+        features.amount_ratio = txn.amount / velocity.avg_amount;
+        features.amount_zscore =
+            (txn.amount - velocity.avg_amount) / max(velocity.amount_deviation, 1.0);
     } else {
-        nf.amount_ratio = txn.amount > 10000 ? 3.0 : 1.0;
-        nf.amount_zscore = txn.amount > 10000 ? 2.0 : 0.0;
+        features.amount_ratio = txn.amount > 10000 ? 3.0 : 1.0;
+        features.amount_zscore = txn.amount > 10000 ? 2.0 : 0.0;
     }
     if (velocity.max_amount_24h > 0) {
-        nf.amount_to_max_ratio = txn.amount / velocity.max_amount_24h;
+        features.amount_to_max_ratio = txn.amount / velocity.max_amount_24h;
     } else {
-        nf.amount_to_max_ratio = 1.0;
+        features.amount_to_max_ratio = 1.0;
     }
-    nf.device_risk = velocity.is_known_device ? 0.0 : 1.0;
-    nf.location_risk = velocity.is_known_location ? 0.0 : 1.0;
-    nf.merchant_diversity = normalize(
-        velocity.unique_merchants_1h, 0, MERCHANT_DIVERSITY_THRESHOLD * 2
-    );
-    return nf;
+    features.device_risk = velocity.is_known_device ? 0.0 : 1.0;
+    features.location_risk = velocity.is_known_location ? 0.0 : 1.0;
+    features.merchant_diversity =
+        normalize(velocity.unique_merchants_1h, 0, MERCHANT_DIVERSITY_THRESHOLD * 2);
+    return features;
 }
-double FeatureEngine::computeVelocityScore(const NormalizedFeatures& features) {
+
+double FeatureEngine::computeVelocityScore(const NormalizedFeatures &features) {
     double score = 0.0;
     if (features.velocity_1m >= 1.0) {
         score += 0.5;
@@ -56,19 +53,21 @@ double FeatureEngine::computeVelocityScore(const NormalizedFeatures& features) {
     } else if (features.velocity_1h >= 0.5) {
         score += 0.1;
     }
-    return std::min(score, 1.0);
+    return min(score, 1.0);
 }
-double FeatureEngine::computeAmountAnomalyScore(const NormalizedFeatures& features) {
+
+double FeatureEngine::computeAmountAnomalyScore(const NormalizedFeatures &features) {
     if (features.amount_ratio <= 1.0) {
         return 0.0;
     }
     double anomaly = sigmoid(2.0 * (features.amount_ratio - 3.0));
     if (features.amount_to_max_ratio > 1.5) {
-        anomaly = std::min(1.0, anomaly + 0.1);
+        anomaly = min(1.0, anomaly + 0.1);
     }
-    return std::min(1.0, std::max(0.0, anomaly));
+    return min(1.0, max(0.0, anomaly));
 }
-double FeatureEngine::computeGeoAnomalyScore(const NormalizedFeatures& features) {
+
+double FeatureEngine::computeGeoAnomalyScore(const NormalizedFeatures &features) {
     double score = 0.0;
     if (features.device_risk > 0.5) {
         score += 0.4;
@@ -79,13 +78,14 @@ double FeatureEngine::computeGeoAnomalyScore(const NormalizedFeatures& features)
     if (features.device_risk > 0.5 && features.location_risk > 0.5) {
         score += 0.2;
     }
-    return std::min(score, 1.0);
+    return min(score, 1.0);
 }
-double FeatureEngine::sigmoid(double x) {
-    return 1.0 / (1.0 + std::exp(-x));
+
+double FeatureEngine::sigmoid(double x) { return 1.0 / (1.0 + exp(-x)); }
+
+double FeatureEngine::normalize(double value, double lower_bound, double upper_bound) {
+    if (upper_bound <= lower_bound)
+        return 0.0;
+    return min(1.0, max(0.0, (value - lower_bound) / (upper_bound - lower_bound)));
 }
-double FeatureEngine::normalize(double value, double min_val, double max_val) {
-    if (max_val <= min_val) return 0.0;
-    return std::min(1.0, std::max(0.0, (value - min_val) / (max_val - min_val)));
-}
-} 
+} // namespace fraud

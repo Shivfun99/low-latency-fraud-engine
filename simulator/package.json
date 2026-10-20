@@ -1,14 +1,16 @@
 {
   "name": "fraud-transaction-simulator",
   "version": "1.0.0",
-  "description": "Simulates realistic transaction streams for testing the fraud detection pipeline",
+  "description": "Submits synthetic transactions to the real fraud detection pipeline",
   "main": "simulator.js",
+  "engines": {
+    "node": ">=18"
+  },
   "scripts": {
     "start": "node simulator.js",
     "burst": "node simulator.js --mode burst",
-    "fraud": "node simulator.js --mode fraud"
-  },
-  "dependencies": {
-    "node-fetch": "^3.3.2"
+    "fraud": "node simulator.js --mode fraud",
+    "demo": "node simulator.js --mode demo",
+    "test": "node --test"
   }
 }
