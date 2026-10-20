@@ -1,4 +1,4 @@
-# Low-Latency Fraud Engine#
+# Low-Latency Fraud Engine
 
 An event-driven fraud detection prototype that evaluates transaction activity, records risk decisions, and streams suspicious events to an analyst dashboard.
 
