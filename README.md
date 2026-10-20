@@ -1,25 +1,85 @@
 # Low-Latency Fraud Engine
 
-An event-driven fraud detection prototype built with Kafka, Redis, Spring Boot, C++ gRPC, PostgreSQL, Express/WebSocket, and React.
+An event-driven fraud detection prototype that evaluates transaction activity, records risk decisions, and streams suspicious events to an analyst dashboard.
 
-It accepts transactions, calculates recent user activity, scores fraud risk, stores decisions and cases, and streams alerts to an analyst dashboard. The C++ scorer is a hand-written heuristic ensemble; it is not a trained XGBoost model. Sub-20 ms latency and million-transaction throughput are design goals, not verified benchmarks.
+The project brings together Kafka, Redis, Spring Boot, a C++ gRPC scoring service, PostgreSQL, WebSockets, and React. It is designed as an end-to-end system you can run locally and inspect—not as a production payment processor.
 
-Read [details.md](details.md) for the problem statement, what this project implements, how the components solve the problem, fixes, and verification results.
+## The problem
 
-```text
-REST transaction → Kafka transactions.raw → Spring orchestrator
-                                            ├─ Redis rolling activity features
-                                            ├─ C++ gRPC risk scoring
-                                            └─ PostgreSQL transactions/decisions/cases
-                                                     ↓
-                                     Kafka fraud.decisions + fraud.alerts
-                                            ├─ WebSocket → React dashboard
-                                            └─ Notification inbox
+A single payment can look normal on its own while a sequence of payments is suspicious. For example, a card may suddenly make many purchases in a short period, use a new device, or spend an amount far outside the account's recent pattern. If a system only looks at transactions one at a time, it can miss that context. If it reacts too late, an analyst may find out after more transactions have already happened.
+
+A useful fraud detection flow needs to do several things together:
+
+- accept transactions quickly without making the caller wait for every downstream step;
+- consider recent activity as well as the current transaction;
+- produce a clear decision and preserve an audit trail;
+- surface suspicious activity to an analyst for investigation.
+
+## A simple example
+
+Suppose Shuv usually makes a few small purchases from the same phone. Within seconds, several more payments arrive for Shuv from that device. Each payment might look plausible alone, but the burst is unusual as a group. A detector that tracks recent transaction velocity can raise the risk, save the decision, and notify the review dashboard.
+
+This repository demonstrates that flow with generated and manually submitted transactions. It does not connect to a bank or stop a real payment.
+
+## How this project solves it
+
+1. **Accept:** the transaction gateway validates a request and publishes it to Kafka. The API returns `202 Accepted`; processing continues asynchronously.
+2. **Add context:** the fraud orchestrator reads recent user activity from Redis and builds features such as transaction velocity, amount deviation, device and location risk, and merchant diversity.
+3. **Score:** the orchestrator sends those features to a C++ service over gRPC. The current scorer combines hand-written heuristics into a risk score; it is not a trained machine-learning model.
+4. **Decide and persist:** the orchestrator records the transaction and its decision in PostgreSQL. Suspicious decisions become reviewable cases.
+5. **Publish and display:** decisions and alerts are published through Kafka. The WebSocket gateway streams live updates to the React dashboard, where an analyst can inspect and resolve a case.
+
+The separation between ingestion, scoring, storage, and display makes each part easier to inspect and lets the event pipeline process work asynchronously.
+
+## Architecture
+
+```mermaid
+flowchart LR
+    Client[Client or simulator] -->|REST transaction| Gateway[Transaction gateway<br/>Spring Boot]
+    Gateway -->|transactions.raw| Kafka[(Kafka)]
+    Kafka --> Orchestrator[Fraud orchestrator<br/>Spring Boot]
+    Orchestrator <-->|recent activity features| Redis[(Redis)]
+    Orchestrator -->|feature request| Scorer[C++ risk scorer<br/>gRPC]
+    Scorer -->|risk scores| Orchestrator
+    Orchestrator -->|transactions, decisions, cases| DB[(PostgreSQL)]
+    Orchestrator -->|fraud.decisions / fraud.alerts| Kafka
+    Kafka --> WS[WebSocket gateway]
+    WS --> Dashboard[React analyst dashboard]
+    Kafka --> Notifications[Notification service]
+    Cases[Case management service] <-->|case review and actions| DB
+    Dashboard --> Cases
 ```
 
-## Run the complete stack with Docker
+### Main components
 
-Install Docker with Compose, then run from the repository root:
+| Component | Responsibility |
+| --- | --- |
+| Transaction gateway | REST ingestion, validation, demo login, and Kafka publishing |
+| Kafka | Buffers and distributes transaction, decision, and alert events |
+| Fraud orchestrator | Builds features, calls the scorer, stores decisions, and emits events |
+| Redis | Keeps recent activity used for rolling features |
+| C++ gRPC scorer | Computes a heuristic risk score from normalized features |
+| PostgreSQL | Stores transactions, decisions, and cases for audit and review |
+| Case management | Retrieves cases and records analyst actions |
+| Notification service | Maintains a recent alert inbox |
+| WebSocket gateway and React dashboard | Deliver and display live decisions, alerts, and case activity |
+
+## Detection approach
+
+The scoring service combines several signals rather than treating one value as proof of fraud:
+
+- **Velocity:** how frequently the user has transacted recently.
+- **Amount anomaly:** how the current amount compares with recent spending features.
+- **Device and location risk:** risk values supplied for the transaction context.
+- **Merchant diversity:** changes in the set of recent merchants.
+
+These signals feed a weighted heuristic ensemble and a fraud probability. The surrounding service turns the score into an `ALLOW`, `REVIEW`, or `BLOCK` decision and persists it for review. This is a transparent prototype baseline. It has no trained model, labeled-data evaluation, or production calibration, so its scores should not be treated as real-world fraud probabilities.
+
+## Run the project
+
+### Option 1: Run the full stack with Docker Compose
+
+Install Docker with the Compose plugin, then run these commands from the repository root:
 
 ```bash
 docker compose up --build -d
@@ -27,83 +87,109 @@ docker compose ps
 docker compose logs --tail=100
 ```
 
-The first build downloads dependencies and can take several minutes. Compose builds the C++, Java, and JavaScript applications from source; prebuilt local images or JARs are not required. Kafka uses KRaft, so there is no ZooKeeper service.
+The first build downloads dependencies and can take several minutes. Kafka runs in KRaft mode; ZooKeeper is not required. When the services are ready, open **http://localhost:5173** and submit transactions from the dashboard.
 
-Open **http://localhost:5173**. Use the dashboard transaction form to submit test transactions through the real scoring pipeline. Repeated requests for the same user exercise velocity detection. Cases can be reviewed and resolved from the dashboard.
+Stop the containers with:
 
 ```bash
-# Stop containers, preserving PostgreSQL data
 docker compose down
 ```
 
-For host applications with containerized infrastructure, or a fully native installation, follow [run-without-docker.md](run-without-docker.md).
+PostgreSQL data is kept in a Docker volume. To remove the containers and that data, use `docker compose down -v`.
 
-## Services
+### Option 2: Run applications on your host
 
-| Service              | Local port | Purpose                                      |
-| -------------------- | ---------- | -------------------------------------------- |
-| Kafka                | 9092       | Transaction and decision events              |
-| Redis                | 6380       | Rolling features; container port is 6379     |
-| PostgreSQL           | 5433       | Audit storage; container port is 5432        |
-| C++ scorer           | 50051      | gRPC scoring and health RPC                  |
-| Transaction gateway  | 8080       | Ingestion, demo login, sandbox               |
-| Fraud orchestrator   | 8081       | Features, scoring, persistence, case actions |
-| Case management      | 8082       | Case retrieval and actions                   |
-| Notification service | 8083       | Recent alert inbox; optional dispatchers     |
-| WebSocket gateway    | 3001       | Live alerts, decisions, counters             |
-| Dashboard            | 5173       | React UI and API/WebSocket proxy             |
-
-## Generate traffic and verify
-
-With the services running:
+You need Kafka, Redis, and PostgreSQL available, plus JDK 17, Maven, Node.js 20+, CMake, a C++17 compiler, protobuf, and gRPC development tools. Start the infrastructure with Docker:
 
 ```bash
+docker compose up -d kafka redis postgres kafka-init
+```
+
+Then install/build and start the applications:
+
+```bash
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build -j2
+mvn package
+npm --prefix websocket-gateway ci
+npm --prefix dashboard ci
 npm --prefix simulator ci
+bash scripts/run-local.sh
+```
+
+The launcher starts the C++ scorer, Java services, WebSocket gateway, and dashboard. It does not start or stop infrastructure. See [run-without-docker.md](run-without-docker.md) for a fully native setup, environment variables, and troubleshooting.
+
+### Local service ports
+
+| Service | Port |
+| --- | ---: |
+| Dashboard | 5173 |
+| Transaction gateway | 8080 |
+| Fraud orchestrator | 8081 |
+| Case management | 8082 |
+| Notification service | 8083 |
+| WebSocket gateway | 3001 |
+| C++ gRPC scorer | 50051 |
+| Kafka | 9092 |
+| Redis | 6380 on host |
+| PostgreSQL | 5433 on host |
+
+## Try it
+
+The local sandbox endpoint accepts a transaction without a login and sends it through the same asynchronous scoring pipeline:
+
+```bash
+curl -i http://localhost:8080/api/v1/sandbox/ingest \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "user_id": "shuv",
+    "amount": 5000,
+    "currency": "INR",
+    "merchant_id": "shop-1",
+    "location": "Chennai",
+    "device_id": "phone-1",
+    "channel": "ONLINE"
+  }'
+```
+
+Ingestion responds with `202 Accepted`, which means the request was accepted for asynchronous processing. View the eventual decision in the dashboard or query the recent decisions endpoint at `http://localhost:3001/api/recent-decisions`.
+
+To generate sample traffic:
+
+```bash
 node simulator/simulator.js --mode demo
 node simulator/simulator.js --mode burst
+```
 
-npm --prefix websocket-gateway ci
+The burst mode is useful for observing how repeated activity changes decisions. The smoke test exercises the live pipeline, including a blocked burst, a persisted case, analyst resolution, and notification delivery. It creates seven test transactions and leaves their records in the database:
+
+```bash
 node scripts/smoke-test.mjs
 ```
 
-The smoke test creates seven transactions for a unique test user, checks authentication and validation, verifies live decisions and a blocked burst, retrieves a persisted case, resolves it, and checks the notification inbox. It leaves test records in the database.
+## Example: Shuv's transaction burst
 
-The simulator uses the sandbox ingestion API, which still runs through Kafka, Redis, C++, and PostgreSQL. `/api/test-alert` on the WebSocket gateway creates a synthetic, non-actionable display alert only.
+Shuv normally uses a phone to make occasional purchases. During a test, seven `₹100` online transactions arrive for Shuv in quick succession from the same device, merchant, and Chennai location. Considered individually, each amount is small. Considered together, the sudden transaction velocity is unusual.
 
-## Build and component tests
+Here is what happens in the project:
 
-```bash
-# C++: requires C++17, CMake, pkg-config, protobuf and gRPC development tools
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
-cmake --build build -j2
-ctest --test-dir build --output-on-failure
+1. The gateway accepts each transaction and publishes it to `transactions.raw`.
+2. The orchestrator checks Shuv's recent activity in Redis and sends the resulting features to the C++ scorer.
+3. The scorer weighs velocity alongside amount, device, location, and merchant signals.
+4. The orchestrator saves the decisions in PostgreSQL and publishes a fraud alert for a blocked transaction.
+5. The dashboard receives the live alert; an analyst can open its case and resolve it.
 
-# Java: use JDK 17 and Maven
-mvn package
+The end-to-end smoke test uses this seven-transaction burst and confirms that the real Kafka/Redis/C++ path produces an `ALLOW` for ordinary activity and a `BLOCK` for the burst, with a corresponding case and alert.
 
-# Optional Redis integration tests (against a running development Redis)
-FRAUD_REDIS_TEST_PORT=6380 mvn -pl spring-services/fraud-orchestrator -am test
+## Project status and limitations
 
-npm --prefix websocket-gateway ci
-npm --prefix websocket-gateway test
-npm --prefix simulator ci
-npm --prefix simulator test
-npm --prefix dashboard ci
-npm --prefix dashboard run build
-```
+- This is a local development and demonstration system, not a production deployment.
+- The scorer is a hand-written heuristic ensemble, not a trained or calibrated ML model.
+- Sub-20 ms latency and million-transaction throughput are design goals, not verified benchmarks.
+- A `BLOCK` is a recorded decision; no bank, card network, or payment processor is connected.
+- Demo credentials, the unauthenticated sandbox endpoint, plaintext service traffic, and the Vite development server are not production security settings.
+- Kafka and PostgreSQL writes are not an exactly-once transaction. The `fraud.dlq` topic exists, but no dead-letter handler is configured.
 
-## API example
+## Technologies
 
-The sandbox endpoint is available without login for local development:
-
-```bash
-curl -fsS http://localhost:8080/api/v1/sandbox/ingest \
-  -H 'Content-Type: application/json' \
-  -d '{"user_id":"rahul","amount":5000,"currency":"INR","merchant_id":"shop-1","location":"Chennai","device_id":"phone-1","channel":"ONLINE"}'
-```
-
-The response is `202 ACCEPTED`; scoring happens asynchronously. Use the dashboard, `/api/recent-decisions` on port 3001, or `/api/v1/cases` on port 8081 to inspect results. The authenticated `/api/v1/transactions` endpoint requires a JWT from `/api/v1/auth/login` using the local demo credentials `admin` / `password`.
-
-## Current boundaries
-
-This is a local development system. Demo credentials, public sandbox/case endpoints, plaintext service traffic, and the Vite development server are not a production security configuration. `BLOCK` records a fraud decision; no bank/payment processor is connected. Kafka/PostgreSQL delivery is not an exactly-once transaction, and the declared `fraud.dlq` topic does not yet have a configured dead-letter handler. See [details.md](details.md) for further limitations.
+**C++17 · gRPC · Protocol Buffers · Java 17 · Spring Boot · Apache Kafka · Redis · PostgreSQL · Node.js · Express · WebSockets · React · Vite · Docker Compose**
